@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<title>Mini Sandbox World</title>
+<style>
+  html,body { height:100%; margin:0; background:#111; color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial; -webkit-user-select:none; user-select:none; }
+  #game { display:block; margin:0 auto; background:#87ceeb; touch-action: none; }
+  #ui { position:fixed; right:10px; top:10px; z-index:20; display:flex; gap:8px; }
+  button{ background:#222;color:#fff;border:1px solid #444;padding:6px 8px;border-radius:6px; }
+  #bottom-controls { position:fixed; left:10px; bottom:12px; z-index:20; display:flex; gap:8px; align-items:center; }
+  .touch-btn{ width:54px;height:54px;background:#222;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;border:1px solid #444;opacity:.95; }
+  #hud { position:fixed; left:10px; top:10px; z-index:20; background:rgba(0,0,0,0.25); padding:6px 8px;border-radius:8px; }
+  #inventory { display:flex; gap:6px; align-items:center; }
+  .slot { width:36px;height:36px;border-radius:6px;background:rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;font-weight:700;border:1px solid rgba(0,0,0,0.4); }
+  #canvasWrap { display:flex; width:100%; height:100vh; align-items:center; justify-content:center; }
+  #fileIn { display:none; }
+  @media (min-width:900px){ #game{ width:900px; height:600px; } }
+  @media (max-width:899px){ #game{ width:100%; height:70vh; } }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div>Daytime: <span id="daytime">0</span></div>
+  <div id="inventory">
+    <div class="slot" id="slot0">🌱</div>
+    <div class="slot" id="slot1">🪵</div>
+    <div class="slot" id="slot2">🪨</div>
+  </div>
+  <div>Selected: <span id="selName">Grass</span></div>
+</div>
+
+<div id="ui">
+  <button id="btn-save">Save</button>
+  <button id="btn-load">Load</button>
+  <button id="btn-export">Export</button>
+  <button id="btn-import">Import</button>
+  <input type="file" id="fileIn" accept="application/json">
+</div>
+
+<div id="canvasWrap">
+  <canvas id="game"></canvas>
+</div>
+
+<div id="bottom-controls">
+  <div id="leftBtn" class="touch-btn">◀</div>
+  <div id="rightBtn" class="touch-btn">▶</div>
+  <div id="jumpBtn" class="touch-btn">⤴</div>
+  <div id="invBtn" class="touch-btn">📦</div>
+</div>
+
+<script>
+/* -------------------------
+   Mini Sandbox World Game
+   Single-file HTML + JS
+   ------------------------- */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+function resizeCanvas(){
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(600, rect.width * devicePixelRatio);
+  canvas.height = Math.max(400, rect.height * devicePixelRatio);
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+/* World config */
+const TILE = 24;         // pixels per tile (CSS pixels)
+const COLUMNS = 120;     // world width in tiles
+const ROWS = 80;         // world height in tiles
+const GRAVITY = 0.9;
+const MAX_FALL = 18;
+
+/* Tile types */
+const TILES = {
+  0: {name:'Air', solid:false, color:'#87ceeb', emoji:' '},
+  1: {name:'Grass', solid:true, color:'#4CAF50', emoji:'🌱'},
+  2: {name:'Dirt', solid:true, color:'#8B5A2B', emoji:'🟫'},
+  3: {name:'Stone', solid:true, color:'#7E7E7E', emoji:'🪨'},
+  4: {name:'Water', solid:false, color:'#1E90FF', emoji:'💧', liquid:true}
+};
+
+/* Simple 2D array map creation */
+function makeEmptyMap(cols, rows){
+  const map = new Array(rows);
+  for(let y=0;y<rows;y++){
+    map[y] = new Array(cols).fill(0);
+  }
+  return map;
+}
+
+/* Procedural initial terrain */
+function generateMap(){
+  const map = makeEmptyMap(COLUMNS, ROWS);
+  // Basic height map
+  for(let x=0;x<COLUMNS;x++){
+    const slope = Math.sin(x * 0.12) * 6;
+    const base = Math.floor(ROWS * 0.55 + slope);
+    for(let y=base;y<ROWS;y++){
+      if(y === base) {
+        map[y][x] = 1; // grass
+      } else if(y < base + 3) {
+        map[y][x] = 2; // dirt
+      } else {
+        map[y][x] = 3; // stone
+      }
+    }
+    // small chance of water pits near base
+    if(Math.random() < 0.03){
+      const h = Math.floor(Math.random()*4)+1;
+      for(let yy=base; yy<base+h; yy++) map[yy][x] = 4;
+    }
+  }
+  // Add some trees
+  for(let i=0;i<60;i++){
+    const x = Math.floor(Math.random() * (COLUMNS - 6)) + 3;
+    // find top ground
+    let yTop = 0;
+    for(let y=0;y<ROWS;y++){ if(map[y][x] !== 0){ yTop = y; break; } }
+    if(yTop > 2 && Math.random() < 0.8){
+      // trunk
+      const height = 3 + Math.floor(Math.random()*3);
+      for(let t=1;t<=height;t++){ map[yTop-t][x] = 2; }
+      // leaves
+      const leafTop = yTop - height;
+      for(let lx = x-2; lx<=x+2; lx++){
+        for(let ly = leafTop-2; ly<=leafTop; ly++){
+          if(lx>=0 && lx<COLUMNS && ly>=0 && ly<ROWS && Math.random() > 0.2) map[ly][lx] = 1;
+        }
+      }
+    }
+  }
+  return map;
+}
+
+let world = generateMap();
+
+/* Player */
+const player = {
+  x: COLUMNS*0.5 * TILE, // pixel coordinates
+  y: 0,
+  w: TILE*0.8,
+  h: TILE*0.95,
+  vx: 0,
+  vy: 0,
+  speed: 3.2,
+  onGround: false,
+  flying: false
+};
+
+/* Camera */
+const camera = { x:0, y:0 };
+
+/* Inventory & selection */
+const hotbar = [1,2,3]; // tile ids for slots 0..2
+let selectedSlot = 0;
+
+/* Day/night cycle */
+let tick = 0;
+
+/* Input state */
+const input = { left:false, right:false, up:false, place:false, digging:false, touchX:0, touchY:0 };
+
+/* Helpers: map get/set */
+function tileAtWorld(px, py){
+  const tx = Math.floor(px / TILE);
+  const ty = Math.floor(py / TILE);
+  if(tx < 0 || tx >= COLUMNS || ty < 0 || ty >= ROWS) return 0;
+  return world[ty][tx] || 0;
+}
+function setTile(tx, ty, id){
+  if(tx < 0 || tx >= COLUMNS || ty < 0 || ty >= ROWS) return;
+  world[ty][tx] = id;
+}
+
+/* Collision check with tiles (AABB) */
+function isSolidAt(px, py){
+  const t = tileAtWorld(px, py);
+  return TILES[t] && TILES[t].solid;
+}
+
+/* Game loop */
+function update(dt){
+  tick += dt;
+  // Input horizontal
+  let move = 0;
+  if(input.left) move -= 1;
+  if(input.right) move += 1;
+  player.vx = move * player.speed;
+
+  // Gravity
+  if(!player.flying){
+    player.vy += GRAVITY * dt * 0.6;
+    if(player.vy > MAX_FALL) player.vy = MAX_FALL;
+  } else {
+    player.vy = 0;
+  }
+
+  // Simple collision-sweep horizontally
+  let newX = player.x + player.vx * dt * 60;
+  let newY = player.y + player.vy * dt * 60;
+
+  // Horizontal collision
+  const cornersH = [
+    {x:newX - player.w/2, y:player.y - player.h/2},
+    {x:newX + player.w/2, y:player.y - player.h/2},
+    {x:newX - player.w/2, y:player.y + player.h/2},
+    {x:newX + player.w/2, y:player.y + player.h/2},
+  ];
+  let collidedH = false;
+  for(const c of cornersH){
+    if(isSolidAt(c.x, c.y)){ collidedH = true; break; }
+  }
+  if(!collidedH) player.x = newX;
+
+  // Vertical collision
+  const cornersV = [
+    {x:player.x - player.w/2, y:newY - player.h/2},
+    {x:player.x + player.w/2, y:newY - player.h/2},
+    {x:player.x - player.w/2, y:newY + player.h/2},
+    {x:player.x + player.w/2, y:newY + player.h/2},
+  ];
+  let collidedV = false;
+  for(const c of cornersV){
+    if(isSolidAt(c.x, c.y)){ collidedV = true; break; }
+  }
+  if(!collidedV){
+    player.y = newY;
+    player.onGround = false;
+  } else {
+    // If colliding while moving down, snap to nearest non-solid
+    if(player.vy > 0){
+      // push player up to just above ground tile
+      const footY = player.y + player.h/2;
+      const tileY = Math.floor(footY / TILE);
+      player.y = tileY * TILE - player.h/2 - 0.001;
+      player.vy = 0;
+      player.onGround = true;
+    } else {
+      // hitting head
+      player.vy = 0;
+    }
+  }
+
+  // Place/dig handling is done on input events (click/touch)
+  // Camera follows player smoothly
+  const targetCamX = player.x - canvas.width/(2*devicePixelRatio) + player.w/2;
+  const targetCamY = player.y - canvas.height/(2*devicePixelRatio) + player.h/2;
+  camera.x += (targetCamX - camera.x) * 0.12;
+  camera.y += (targetCamY - camera.y) * 0.12;
+
+  // Day/night wrap
+  if(tick > 100000) tick = 0;
+}
+
+/* Rendering */
+function draw(){
+  // Background sky (simple gradient for day/night)
+  const day = (Math.sin(tick*0.0003) + 1)/2; // 0..1
+  const skyTop = lerpHex('#020617', '#87ceeb', day);
+  const skyBot = lerpHex('#00102b', '#bfe9ff', day);
+  // fill background
+  const cw = canvas.width / devicePixelRatio;
+  const ch = canvas.height / devicePixelRatio;
+  const g = ctx.createLinearGradient(0,0,0,ch);
+  g.addColorStop(0, skyTop);
+  g.addColorStop(1, skyBot);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,cw,ch);
+
+  // world draw (tiles)
+  const x0 = Math.floor(camera.x / TILE) - 2;
+  const y0 = Math.floor(camera.y / TILE) - 2;
+  const cols = Math.ceil(cw / TILE) + 4;
+  const rows = Math.ceil(ch / TILE) + 4;
+  for(let y = y0; y < y0 + rows; y++){
+    if(y<0 || y>=ROWS) continue;
+    for(let x = x0; x < x0 + cols; x++){
+      if(x<0 || x>=COLUMNS) continue;
+      const id = world[y][x];
+      const px = x * TILE - camera.x;
+      const py = y * TILE - camera.y;
+
+      // water special: draw translucent with waves
+      if(id === 4){
+        ctx.fillStyle = TILES[id].color;
+        ctx.globalAlpha = 0.9;
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.globalAlpha = 1;
+        // small wave lines
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.beginPath();
+        ctx.moveTo(px, py + (TILE*0.4 + Math.sin((x+y+tick*0.01))*2));
+        ctx.lineTo(px+TILE, py + (TILE*0.4 + Math.sin((x+y+tick*0.01))*2));
+        ctx.stroke();
+        continue;
+      }
+
+      if(id !== 0){
+        ctx.fillStyle = TILES[id].color;
+        ctx.fillRect(px, py, TILE, TILE);
+        // subtle top shading
+        ctx.fillStyle = 'rgba(0,0,0,0.06)';
+        ctx.fillRect(px, py + TILE*0.6, TILE, TILE*0.4);
+      } else {
+        // air tile - do nothing (sky shows)
+      }
+    }
+  }
+
+  // Draw player
+  const px = player.x - camera.x - player.w/2;
+  const py = player.y - camera.y - player.h/2;
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(px + player.w/2, py + player.h + 6, player.w*0.6, 6, 0, 0, Math.PI*2);
+  ctx.fill();
+  // body
+  ctx.fillStyle = '#f6e58d';
+  ctx.fillRect(px, py, player.w, player.h);
+  ctx.strokeStyle = '#00000020';
+  ctx.strokeRect(px, py, player.w, player.h);
+
+  // cursor (crosshair for desktop)
+  if(!isTouchDevice()){
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.arc(mouse.x - camera.x, mouse.y - camera.y, 10, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  // HUD additional: currently selected tile icon
+  document.getElementById('daytime').innerText = Math.floor(day*100);
+  document.getElementById('selName').innerText = TILES[hotbar[selectedSlot]].name;
+}
+
+/* Utility: linear interpolate color hex -> hex */
+function lerpHex(a,b,t){
+  // strip #
+  if(a[0] === '#') a=a.slice(1);
+  if(b[0] === '#') b=b.slice(1);
+  const ar = parseInt(a.substring(0,2),16), ag = parseInt(a.substring(2,4),16), ab = parseInt(a.substring(4,6),16);
+  const br = parseInt(b.substring(0,2),16), bg = parseInt(b.substring(2,4),16), bb = parseInt(b.substring(4,6),16);
+  const rr = Math.round(ar + (br-ar)*t).toString(16).padStart(2,'0');
+  const rg = Math.round(ag + (bg-ag)*t).toString(16).padStart(2,'0');
+  const rb = Math.round(ab + (bb-ab)*t).toString(16).padStart(2,'0');
+  return '#'+rr+rg+rb;
+}
+
+/* Mouse/touch handling */
+let mouse = {x:0,y:0, down:false};
+canvas.addEventListener('mousemove', (e)=> {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left);
+  mouse.y = (e.clientY - r.top);
+});
+canvas.addEventListener('mousedown', (e)=>{
+  mouse.down = true;
+  handleWorldClick(mouse.x, mouse.y, e.button === 2 ? 'place' : 'dig');
+});
+canvas.addEventListener('mouseup', ()=>{ mouse.down = false; });
+
+canvas.addEventListener('touchstart', (e)=>{
+  e.preventDefault();
+  const t = e.touches[0];
+  const r = canvas.getBoundingClientRect();
+  const tx = (t.clientX - r.left);
+  const ty = (t.clientY - r.top);
+  handleWorldClick(tx, ty, 'dig'); // touch toggles dig/place (cycling)
+});
+
+function handleWorldClick(cx, cy, mode){
+  const worldX = Math.floor((camera.x + cx) / TILE);
+  const worldY = Math.floor((camera.y + cy) / TILE);
+  if(worldX < 0 || worldX >= COLUMNS || worldY < 0 || worldY >= ROWS) return;
+  if(mode === 'dig'){
+    // pick up block (simple)
+    const id = world[worldY][worldX];
+    if(id !== 0){
+      // remove and add nothing (no inventory counting for simplicity)
+      world[worldY][worldX] = 0;
+    } else {
+      // if empty, place selected
+      const placeId = hotbar[selectedSlot];
+      world[worldY][worldX] = placeId;
+    }
+  } else if(mode === 'place'){
+    const placeId = hotbar[selectedSlot];
+    world[worldY][worldX] = placeId;
+  }
+}
+
+/* Keyboard and gamepad */
+window.addEventListener('keydown', (e)=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') input.left = true;
+  if(e.key === 'ArrowRight' || e.key === 'd') input.right = true;
+  if(e.key === 'ArrowUp' || e.key === 'w' || e.key === ' ') {
+    if(player.onGround || player.flying){
+      player.vy = -10;
+      player.onGround = false;
+    }
+  }
+  if(e.key === 'e'){ selectedSlot = (selectedSlot+1) % hotbar.length; updateHotbarUI(); }
+});
+window.addEventListener('keyup', (e)=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') input.left = false;
+  if(e.key === 'ArrowRight' || e.key === 'd') input.right = false;
+});
+
+/* Touch UI buttons */
+document.getElementById('leftBtn').addEventListener('touchstart',(e)=>{ e.preventDefault(); input.left = true; });
+document.getElementById('leftBtn').addEventListener('touchend',(e)=>{ e.preventDefault(); input.left = false; });
+document.getElementById('rightBtn').addEventListener('touchstart',(e)=>{ e.preventDefault(); input.right = true; });
+document.getElementById('rightBtn').addEventListener('touchend',(e)=>{ e.preventDefault(); input.right = false; });
+document.getElementById('jumpBtn').addEventListener('touchstart',(e)=>{ e.preventDefault(); if(player.onGround || player.flying){ player.vy = -10; player.onGround = false; }});
+document.getElementById('invBtn').addEventListener('click',(e)=>{ selectedSlot = (selectedSlot+1) % hotbar.length; updateHotbarUI(); });
+
+function updateHotbarUI(){
+  for(let i=0;i<hotbar.length;i++){
+    document.getElementById('slot'+i).innerText = TILES[hotbar[i]].emoji || '?';
+    document.getElementById('slot'+i).style.outline = (i === selectedSlot) ? '2px solid #fff8' : 'none';
+  }
+}
+updateHotbarUI();
+
+/* Save / Load */
+function saveWorld(){
+  try{
+    const data = { world, player, tick, hotbar, selectedSlot };
+    localStorage.setItem('mini_sandbox_save_v1', JSON.stringify(data));
+    alert('World saved locally.');
+  }catch(e){ alert('Save failed: '+e); }
+}
+function loadWorld(){
+  try{
+    const raw = localStorage.getItem('mini_sandbox_save_v1');
+    if(!raw){ alert('No local save found.'); return; }
+    const data = JSON.parse(raw);
+    world = data.world || world;
+    selectedSlot = data.selectedSlot || selectedSlot;
+    updateHotbarUI();
+    alert('World loaded.');
+  }catch(e){ alert('Load failed: '+e); }
+}
+document.getElementById('btn-save').addEventListener('click', saveWorld);
+document.getElementById('btn-load').addEventListener('click', loadWorld);
+
+document.getElementById('btn-export').addEventListener('click', ()=>{
+  const data = { world, player, tick, hotbar, selectedSlot };
+  const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'mini_sandbox_export.json'; document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1000);
+});
+
+document.getElementById('btn-import').addEventListener('click', ()=>{
+  document.getElementById('fileIn').click();
+});
+document.getElementById('fileIn').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if(!f) return;
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const data = JSON.parse(e.target.result);
+      world = data.world || world;
+      selectedSlot = data.selectedSlot || selectedSlot;
+      updateHotbarUI();
+      alert('Import successful.');
+    }catch(err){ alert('Invalid file.'); }
+  };
+  reader.readAsText(f);
+});
+
+/* Utility detect touch */
+function isTouchDevice(){ return 'ontouchstart' in window || navigator.maxTouchPoints > 0; }
+
+/* Mouse world click for placing/digging with mouse buttons */
+canvas.addEventListener('contextmenu', (e)=> e.preventDefault());
+
+/* Main loop */
+let last = performance.now();
+function loop(now){
+  const dt = (now - last) / 1000;
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* Small helper: center player at spawn */
+(function placePlayerSpawn(){
+  // find highest open area near middle
+  const startX = Math.floor(COLUMNS/2);
+  let spawnY = 0;
+  for(let y=0;y<ROWS;y++) if(world[y][startX] !== 0){ spawnY = y-3; break; }
+  player.x = (startX + 0.5) * TILE;
+  player.y = (spawnY + 0.5) * TILE;
+})();
+
+/* OPTIONAL: keyboard number keys to change selected block */
+window.addEventListener('keydown', (e)=>{
+  if(e.key >= '1' && e.key <= String(hotbar.length)) {
+    selectedSlot = parseInt(e.key)-1; updateHotbarUI();
+  }
+});
+
+/* Minor polish: show simple debug on touch tap (cycle block) */
+canvas.addEventListener('dblclick', (e)=> {
+  selectedSlot = (selectedSlot + 1) % hotbar.length; updateHotbarUI();
+});
+
+</script>
+</body>
+</html>
